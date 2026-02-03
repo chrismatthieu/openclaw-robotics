@@ -1,0 +1,21 @@
+# RealSense Person Follow Demo - Phase 1
+# Python-only implementation for macOS
+
+# RealSense camera
+# pyrealsense2 - already installed on system (not available via pip on macOS)
+
+# Person detection
+mediapipe>=0.10.0
+
+# VLM integration
+ollama>=0.1.0
+
+# HTTP API server
+flask>=3.0.0
+
+# Image processing
+numpy>=1.24.0
+opencv-python>=4.8.0
+
+# Utilities
+requests>=2.31.0
