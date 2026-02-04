@@ -74,7 +74,7 @@ The app will:
 ### Console Output
 
 ```
-[DETECTION] Person #1: x=0.12m, y=0.05m, z=1.35m (conf=0.92)
+[DETECTION] Person #1: distance=1.35m, x=0.12m (conf=92%)
 [TARGET] Following Person #1 (target: 1.0m)
 [TWIST] linear_x=0.15 m/s, angular_z=-0.08 rad/s
 ```
@@ -256,17 +256,37 @@ The VLM provides position estimates (left/center/right) and distance estimates (
 The `/find_and_follow` endpoint is the most powerful object tracking command:
 
 ```bash
+# Basic - follow until target is lost
 curl -X POST http://localhost:5050/find_and_follow \
   -H "Content-Type: application/json" \
-  -d '{"object": "red ball", "distance": 0.5, "track": true}'
+  -d '{"object": "person", "distance": 1.0}'
+
+# Continuous mode - search for new targets when lost
+curl -X POST http://localhost:5050/find_and_follow \
+  -H "Content-Type: application/json" \
+  -d '{"object": "person", "distance": 1.0, "continuous": true}'
 ```
+
+**Parameters:**
+- `object`: Description of what to find (use "person" for people)
+- `distance`: Target follow distance in meters (default: 0.5)
+- `track`: Keep tracking after reaching target (default: true)
+- `continuous`: Search for new target when current is lost (default: false)
+- `max_search_rotations`: Max rotations when searching (default: 1.5)
 
 **Behavior:**
 1. Checks if object is visible in current camera view
 2. If not found, **rotates to search** (30° increments, up to 540° by default)
 3. Once found, turns to face and approaches
 4. When at target distance, continues tracking (adjusting position as object moves)
-5. If object is lost, attempts to re-find it
+5. If target is lost:
+   - **Default:** Mission ends, robot stops
+   - **Continuous mode:** Robot searches for a new target and continues
+
+**Continuous mode** is useful for scenarios like:
+- Security patrol: "Follow anyone who enters the area"
+- Reception: "Greet and follow visitors as they arrive"
+- Demo: "Keep following people until I say stop"
 
 This means you can say "find and follow the red ball" even if the ball is behind the robot - it will search, locate, and pursue it.
 

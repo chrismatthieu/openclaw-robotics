@@ -859,6 +859,7 @@ List only clearly visible objects:"""
             - object: Description of object to find and follow
             - distance: Target distance from object in meters (default: 0.5)
             - track: Keep tracking after reaching (default: true)
+            - continuous: If target is lost, search for new target (default: false)
             - max_search_rotations: Max full rotations to search (default: 1.5)
             """
             data = request.get_json(silent=True) or {}
@@ -866,6 +867,7 @@ List only clearly visible objects:"""
             obj_description = data.get('object') or data.get('description')
             target_distance = data.get('distance', 0.5)
             track = data.get('track', True)
+            continuous = data.get('continuous', False)
             max_rotations = data.get('max_search_rotations', 1.5)
             
             if not obj_description:
@@ -895,15 +897,16 @@ List only clearly visible objects:"""
             # Start mission in background
             self._mission_thread = threading.Thread(
                 target=self._mission_find_and_follow_object,
-                args=(mission, obj_description, target_distance, track, max_rotations),
+                args=(mission, obj_description, target_distance, track, continuous, max_rotations),
                 daemon=True
             )
             self._mission_thread.start()
             
             return jsonify({
                 'status': 'ok',
-                'message': f'Searching for {obj_description}...',
+                'message': f'Searching for {obj_description}...' + (' (continuous mode)' if continuous else ''),
                 'mission_id': mission.id,
+                'continuous': continuous,
                 'object': obj_description,
                 'target_distance': target_distance,
                 'tracking': track
@@ -1310,11 +1313,13 @@ List only clearly visible objects:"""
 
     def _mission_find_and_follow_person(self, mission: Mission, description: str,
                                           target_distance: float, track: bool,
-                                          max_rotations: float):
+                                          continuous: bool, max_rotations: float):
         """
         Find and follow a person using MediaPipe tracker (much more reliable than VLM).
+        
+        If continuous=True, will search for a new person when current target is lost.
         """
-        print(f"[MISSION] Find and follow person: {description}")
+        print(f"[MISSION] Find and follow person: {description}" + (" (continuous)" if continuous else ""))
         
         try:
             # Update target distance
@@ -1375,7 +1380,8 @@ List only clearly visible objects:"""
                 # Phase 3: Track until cancelled or timeout
                 mission.current_step = "Tracking person"
                 track_start = time.time()
-                max_track_time = 120.0  # 2 minutes max
+                max_track_time = 300.0 if continuous else 120.0  # 5 min continuous, 2 min normal
+                lost_count = 0
                 
                 while mission.status == MissionStatus.RUNNING:
                     if time.time() - track_start > max_track_time:
@@ -1385,12 +1391,52 @@ List only clearly visible objects:"""
                     # Check if we still see the person
                     target = self._get_target_person()
                     if target is None:
-                        # Lost person - wait a bit and check again
+                        lost_count += 1
+                        
+                        # Wait a bit and check again
                         time.sleep(1.0)
                         target = self._get_target_person()
-                        if target is None:
+                        
+                        if target is None and lost_count >= 3:
+                            # Person definitely lost
+                            self.controller.stop()
                             mission.steps_completed.append("Person lost")
-                            # Could add re-search logic here
+                            
+                            if continuous:
+                                # Continuous mode: search for a new person
+                                print("[MISSION] Person lost - searching for new target (continuous mode)")
+                                mission.current_step = "Searching for new person..."
+                                
+                                # Search by rotating
+                                search_found = False
+                                for rotation in range(12):  # Up to 360 degrees (12 x 30)
+                                    if mission.status != MissionStatus.RUNNING:
+                                        break
+                                    
+                                    # Check for person
+                                    persons = self.tracker.persons
+                                    if persons:
+                                        search_found = True
+                                        mission.steps_completed.append(f"Found new person at {persons[0].z:.1f}m")
+                                        print(f"[MISSION] Found new person at {persons[0].z:.1f}m")
+                                        self.controller.start(target_description=description)
+                                        lost_count = 0
+                                        break
+                                    
+                                    # Rotate to search
+                                    self.controller.turn(30)
+                                    time.sleep(1.5)
+                                
+                                if not search_found and mission.status == MissionStatus.RUNNING:
+                                    # Couldn't find anyone, keep waiting
+                                    mission.current_step = "Waiting for person..."
+                                    time.sleep(2.0)
+                            else:
+                                # Non-continuous: mission ends
+                                mission.result = "Person lost - mission ended"
+                                break
+                    else:
+                        lost_count = 0  # Reset lost counter
                     
                     time.sleep(0.5)
             else:
@@ -1464,8 +1510,8 @@ List only clearly visible objects:"""
         })
 
     def _mission_find_and_follow_object(self, mission: Mission, obj_description: str,
-                                         target_distance: float, track: bool, 
-                                         max_rotations: float):
+                                         target_distance: float, track: bool,
+                                         continuous: bool, max_rotations: float):
         """
         Find an object (searching if needed) and then approach/track it.
         
@@ -1473,15 +1519,16 @@ List only clearly visible objects:"""
         2. If not, rotate to search
         3. Once found, approach
         4. Optionally keep tracking
+        5. If continuous=True and target lost, search for new target
         """
-        print(f"[MISSION] Find and follow: {obj_description}")
+        print(f"[MISSION] Find and follow: {obj_description}" + (" (continuous)" if continuous else ""))
         
         # Check if looking for a person - use MediaPipe tracker instead of VLM
         is_person = any(word in obj_description.lower() for word in 
                        ['person', 'human', 'people', 'someone', 'somebody', 'man', 'woman', 'guy', 'girl'])
         
         if is_person:
-            self._mission_find_and_follow_person(mission, obj_description, target_distance, track, max_rotations)
+            self._mission_find_and_follow_person(mission, obj_description, target_distance, track, continuous, max_rotations)
             return
         
         try:

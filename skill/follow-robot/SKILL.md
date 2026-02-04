@@ -445,21 +445,28 @@ curl http://localhost:5050/objects
 
 **Usage:**
 ```bash
-curl -X POST http://localhost:5050/find_and_follow -H "Content-Type: application/json" -d '{"object": "red ball", "distance": 0.5}'
+# Basic - stop when target is lost
+curl -X POST http://localhost:5050/find_and_follow -H "Content-Type: application/json" -d '{"object": "person", "distance": 1.0}'
+
+# Continuous mode - search for new target when lost
+curl -X POST http://localhost:5050/find_and_follow -H "Content-Type: application/json" -d '{"object": "person", "continuous": true}'
 ```
 
 **Parameters:**
-- `object`: Description of object to find and follow
+- `object`: Description of object to find and follow (use "person" for people)
 - `distance`: Target distance from object in meters (default: 0.5)
 - `track`: Keep tracking after reaching (default: true)
+- `continuous`: If target is lost, search for new target (default: false)
 - `max_search_rotations`: Max full rotations to search (default: 1.5)
 
 **Behavior:**
 1. Checks if object is visible in current view
 2. If not found, rotates incrementally (30° at a time) to search
 3. Once found, turns to face and approaches
-4. When at target distance, optionally continues tracking (adjusting position)
-5. If object is lost during tracking, attempts to re-find it
+4. When at target distance, continues tracking (adjusting position)
+5. If target is lost:
+   - **continuous=false** (default): Mission ends, robot stops
+   - **continuous=true**: Robot searches for a new target and continues
 
 **Example response:**
 ```json
@@ -566,6 +573,15 @@ curl -X POST http://localhost:5050/mission/cancel
 ### Track a Moving Object
 - User: "Follow that toy car"
 - Assistant: *calls follow.find_and_follow("toy car", 0.3, true)* "Searching for the toy car... Found it! I'll follow it and keep tracking."
+
+### Continuous Person Following
+- User: "Follow anyone who comes by and keep looking for new people"
+- Assistant: *calls follow.find_and_follow("person", 1.0, true, true)* "I'll follow anyone I see. If they leave, I'll search for someone else."
+- *Person walks by, robot follows*
+- *Person leaves frame*
+- Robot: "Person lost - searching for new target..."
+- *Robot rotates, finds another person*
+- Robot: "Found new person! Following them now."
 
 ### Find Something Anywhere
 - User: "Where's my phone?"
