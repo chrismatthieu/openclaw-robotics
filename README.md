@@ -89,6 +89,186 @@ The app will:
 | `/set_distance` | POST | Set target follow distance in meters |
 | `/status` | GET | Get current status |
 | `/snapshot` | GET | Get annotated camera frame |
+| `/mission` | POST | Start autonomous mission with goal |
+| `/mission` | GET | Get current mission status |
+| `/mission/cancel` | POST | Cancel current mission |
+| `/analyze` | POST | Analyze scene with custom VLM prompt |
+| `/events` | GET/POST | Configure event webhooks |
+| `/events/test` | POST | Test webhook connectivity |
+| `/teleop` | POST | Natural language movement command |
+| `/move` | POST | Move forward/backward by distance or time |
+| `/turn` | POST | Turn left/right by angle |
+| `/velocity` | POST | Set raw velocity command |
+| `/sequence` | POST | Execute command sequence |
+| `/manual/status` | GET | Get manual control status |
+| `/find_and_follow` | POST | Search, find, approach, and track object |
+| `/find_object` | POST | Find object in scene via VLM |
+| `/approach_object` | POST | Find and approach an object |
+| `/look_for` | POST | Scan environment for object |
+| `/objects` | GET | List all visible objects |
+| `/health` | GET | Health check endpoint |
+
+### Autonomous Missions
+
+Start multi-step missions that execute independently:
+
+```bash
+# Follow until condition
+curl -X POST http://localhost:5050/mission \
+  -H "Content-Type: application/json" \
+  -d '{"goal": "follow the person in red until they sit down"}'
+
+# Find a specific person
+curl -X POST http://localhost:5050/mission \
+  -H "Content-Type: application/json" \
+  -d '{"goal": "find a person wearing a hat"}'
+
+# Patrol/scan the area
+curl -X POST http://localhost:5050/mission \
+  -H "Content-Type: application/json" \
+  -d '{"goal": "patrol the area and report who you see"}'
+
+# Check mission status
+curl http://localhost:5050/mission
+
+# Cancel mission
+curl -X POST http://localhost:5050/mission/cancel
+```
+
+### Scene Analysis
+
+Use the VLM to analyze the current scene with custom questions:
+
+```bash
+curl -X POST http://localhost:5050/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Is the person heading toward the exit?"}'
+```
+
+Example prompts:
+- "Is the person sitting or standing?"
+- "What is the person doing?"
+- "Are there obstacles between me and the target?"
+- "How many people are facing the camera?"
+
+### Event Webhooks
+
+The robot can post events to OpenClaw or other services:
+
+```bash
+# Get current webhook config
+curl http://localhost:5050/events
+
+# Configure webhook
+curl -X POST http://localhost:5050/events \
+  -H "Content-Type: application/json" \
+  -d '{"webhook_url": "http://localhost:18789/webhook", "enabled": true}'
+
+# Test webhook
+curl -X POST http://localhost:5050/events/test
+```
+
+**Events posted automatically:**
+- `person_lost` - Target lost for >2 seconds
+- `person_found` - Person detected after being lost
+- `mission_completed` - Mission finished successfully
+- `mission_failed` - Mission encountered an error
+- `target_reached` - Robot at target follow distance
+
+### Manual Teleoperation
+
+Control the robot with natural language commands via the `/teleop` endpoint:
+
+```bash
+# Natural language command (parsed and executed)
+curl -X POST http://localhost:5050/teleop \
+  -H "Content-Type: application/json" \
+  -d '{"command": "move forward 1 meter, turn left, go forward for 5 seconds, stop"}'
+
+# Move by distance
+curl -X POST http://localhost:5050/move \
+  -H "Content-Type: application/json" \
+  -d '{"distance": 1.0}'
+
+# Move for duration
+curl -X POST http://localhost:5050/move \
+  -H "Content-Type: application/json" \
+  -d '{"duration": 3.0, "velocity": 0.3}'
+
+# Turn (positive=left, negative=right)
+curl -X POST http://localhost:5050/turn \
+  -H "Content-Type: application/json" \
+  -d '{"angle": 90}'
+
+# Command sequence
+curl -X POST http://localhost:5050/sequence \
+  -H "Content-Type: application/json" \
+  -d '{"commands": [
+    {"type": "move", "distance": 1.0},
+    {"type": "turn", "angle": -90},
+    {"type": "move", "duration": 5, "velocity": 0.3}
+  ]}'
+```
+
+**Supported teleop commands:**
+- `"move forward/backward X meters"` - Move by distance
+- `"go forward for X seconds"` - Move for duration
+- `"turn left/right"` - Turn 90 degrees
+- `"turn left/right X degrees"` - Turn specific angle
+- `"turn around"` - Turn 180 degrees
+- `"stop"` / `"halt"` - Stop all movement
+- Chain commands with "then", "and", or commas
+
+### Object Detection
+
+Find and approach objects (not just people) using VLM:
+
+```bash
+# Find an object
+curl -X POST http://localhost:5050/find_object \
+  -H "Content-Type: application/json" \
+  -d '{"object": "red chair"}'
+
+# Approach an object
+curl -X POST http://localhost:5050/approach_object \
+  -H "Content-Type: application/json" \
+  -d '{"object": "water bottle", "distance": 0.3}'
+
+# Scan for an object (rotate to search)
+curl -X POST http://localhost:5050/look_for \
+  -H "Content-Type: application/json" \
+  -d '{"object": "trash can"}'
+
+# List all visible objects
+curl http://localhost:5050/objects
+```
+
+**Can find any describable object:**
+- Furniture: chairs, tables, couches, desks
+- Electronics: laptops, phones, monitors, TVs
+- Household: bottles, cups, bags, boxes
+- Other: doors, plants, toys, books, balls, etc.
+
+The VLM provides position estimates (left/center/right) and distance estimates (close/medium/far) which are converted to movement commands.
+
+### Find and Follow (Smart Object Tracking)
+
+The `/find_and_follow` endpoint is the most powerful object tracking command:
+
+```bash
+curl -X POST http://localhost:5050/find_and_follow \
+  -H "Content-Type: application/json" \
+  -d '{"object": "red ball", "distance": 0.5, "track": true}'
+```
+
+**Behavior:**
+1. Checks if object is visible in current camera view
+2. If not found, **rotates to search** (30° increments, up to 540° by default)
+3. Once found, turns to face and approaches
+4. When at target distance, continues tracking (adjusting position as object moves)
+5. If object is lost, attempts to re-find it
+
+This means you can say "find and follow the red ball" even if the ball is behind the robot - it will search, locate, and pursue it.
 
 ### OpenClaw Integration
 
@@ -209,23 +389,43 @@ openclaw gateway status
 
 ## Architecture
 
+### Two-Loop Architecture
+
 ```
-RealSense Camera
-      │
-      ▼
-PersonTracker (MediaPipe @ 30Hz)
-      │
-      ├──► PersonIdentifier (qwen3-vl @ 1-2Hz)
-      │
-      ▼
-FollowerController
-      │
-      ▼
-Console Output (Twist commands)
-      │
-      ▼
-[Phase 2: ROS2 /cmd_vel]
+┌─────────────────────────────────────────────────────────────────┐
+│                    OpenClaw (Slow Loop ~1-5 Hz)                  │
+│                                                                  │
+│   • Natural language interface                                   │
+│   • Autonomous missions & goals                                  │
+│   • Scene understanding via VLM                                  │
+│   • High-level decision making                                   │
+│   • Proactive monitoring (heartbeats)                            │
+│                                                                  │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ HTTP API (commands, queries, events)
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  Python App (Fast Loop @ 30 Hz)                  │
+│                                                                  │
+│   RealSense Camera ──► PersonTracker (MediaPipe)                │
+│                              │                                   │
+│                              ├──► PersonIdentifier (VLM @ 1-2Hz) │
+│                              │                                   │
+│                              ▼                                   │
+│                       FollowerController                         │
+│                              │                                   │
+│                              ▼                                   │
+│                    Twist Commands (Console)                      │
+│                              │                                   │
+│                              ▼                                   │
+│                    [Phase 2: ROS2 /cmd_vel]                      │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+**Fast Loop (Python):** Handles real-time perception, safety, and control at 30Hz.
+
+**Slow Loop (OpenClaw):** Handles high-level reasoning, missions, and user interaction at 1-5Hz.
 
 ## Configuration
 

@@ -329,3 +329,252 @@ Keep each description to 1-2 sentences."""
     def clear_cache(self):
         """Clear the identification cache."""
         self._cache.clear()
+
+    def analyze_scene(self, frame: np.ndarray, persons: list[DetectedPerson], 
+                      prompt: str) -> str:
+        """
+        Analyze the scene with a custom prompt.
+        
+        Useful for questions like:
+        - "Is the person heading toward the exit?"
+        - "Are there obstacles in the frame?"
+        - "What is happening in this scene?"
+        - "Is this condition true: 'person is sitting down'?"
+        
+        Args:
+            frame: Current camera frame
+            persons: List of detected persons
+            prompt: Custom analysis prompt/question
+            
+        Returns:
+            VLM analysis as a string
+        """
+        if not self.use_vlm:
+            return "VLM not available for scene analysis."
+        
+        # Throttle
+        with self._lock:
+            now = time.time()
+            if now - self._last_query_time < self._min_query_interval:
+                return "Please wait before requesting another analysis."
+            self._last_query_time = now
+        
+        # Annotate frame with person numbers if there are people
+        if persons:
+            annotated = self._annotate_frame_with_numbers(frame, persons)
+        else:
+            annotated = frame
+        
+        image_b64 = self._encode_image(annotated)
+        
+        # Build context-aware prompt
+        context = f"There are {len(persons)} person(s) visible in this image"
+        if persons:
+            context += ", numbered 1 through " + str(len(persons))
+            context += ". Person positions:\n"
+            for i, p in enumerate(persons, 1):
+                context += f"  Person #{i}: {p.z:.1f}m away, x={p.x:.2f}m\n"
+        context += "\n"
+        
+        full_prompt = f"""{context}
+{prompt}
+
+Please provide a helpful, concise answer."""
+
+        try:
+            response = ollama.chat(
+                model=self.model,
+                messages=[{
+                    'role': 'user',
+                    'content': full_prompt,
+                    'images': [image_b64]
+                }],
+                options={
+                    'temperature': 0.3,
+                    'num_predict': 300
+                }
+            )
+            
+            return response['message']['content'].strip()
+            
+        except Exception as e:
+            print(f"[ERROR] VLM analysis failed: {e}")
+            return f"Analysis failed: {e}"
+
+    def check_condition(self, frame: np.ndarray, persons: list[DetectedPerson],
+                        condition: str) -> tuple[bool, str]:
+        """
+        Check if a condition is true in the current scene.
+        
+        Args:
+            frame: Current camera frame
+            persons: List of detected persons
+            condition: Condition to check (e.g., "person is sitting down")
+            
+        Returns:
+            Tuple of (is_true, explanation)
+        """
+        prompt = f"""Is this condition currently TRUE or FALSE: "{condition}"
+
+Answer with exactly one word first (TRUE or FALSE), then explain in one sentence."""
+
+        analysis = self.analyze_scene(frame, persons, prompt)
+        
+        is_true = analysis.upper().startswith("TRUE") or "TRUE" in analysis.upper()[:20]
+        
+        return is_true, analysis
+
+    def find_object(self, frame: np.ndarray, object_description: str) -> dict:
+        """
+        Find an object in the scene and return its approximate location.
+        
+        Args:
+            frame: Current camera frame
+            object_description: Description of object to find (e.g., "red chair", "water bottle")
+            
+        Returns:
+            Dict with found status, position (left/center/right), and confidence
+        """
+        if not self.use_vlm:
+            return {
+                'found': False,
+                'reason': 'VLM not available'
+            }
+        
+        # Throttle
+        with self._lock:
+            now = time.time()
+            if now - self._last_query_time < self._min_query_interval:
+                return {
+                    'found': False,
+                    'reason': 'Please wait before requesting another search'
+                }
+            self._last_query_time = now
+        
+        image_b64 = self._encode_image(frame)
+        
+        prompt = f"""Look at this image and find: "{object_description}"
+
+If you can see this object, respond with:
+FOUND: [position]
+Position should be one of: FAR_LEFT, LEFT, CENTER_LEFT, CENTER, CENTER_RIGHT, RIGHT, FAR_RIGHT
+Also estimate if it appears CLOSE (within 1m), MEDIUM (1-3m), or FAR (more than 3m).
+
+If you cannot see this object, respond with:
+NOT_FOUND: [reason]
+
+Example responses:
+- FOUND: CENTER, MEDIUM
+- FOUND: LEFT, CLOSE
+- NOT_FOUND: No red chair visible in the scene
+
+Your response:"""
+
+        try:
+            response = ollama.chat(
+                model=self.model,
+                messages=[{
+                    'role': 'user',
+                    'content': prompt,
+                    'images': [image_b64]
+                }],
+                options={
+                    'temperature': 0.1,
+                    'num_predict': 50
+                }
+            )
+            
+            answer = response['message']['content'].strip().upper()
+            
+            if 'FOUND' in answer and 'NOT_FOUND' not in answer:
+                # Parse position
+                position = 'CENTER'
+                horizontal_offset = 0.0  # -1.0 (far left) to 1.0 (far right)
+                
+                if 'FAR_LEFT' in answer or 'FAR LEFT' in answer:
+                    position = 'FAR_LEFT'
+                    horizontal_offset = -0.8
+                elif 'CENTER_LEFT' in answer or 'CENTER LEFT' in answer:
+                    position = 'CENTER_LEFT'
+                    horizontal_offset = -0.3
+                elif 'CENTER_RIGHT' in answer or 'CENTER RIGHT' in answer:
+                    position = 'CENTER_RIGHT'
+                    horizontal_offset = 0.3
+                elif 'FAR_RIGHT' in answer or 'FAR RIGHT' in answer:
+                    position = 'FAR_RIGHT'
+                    horizontal_offset = 0.8
+                elif 'LEFT' in answer:
+                    position = 'LEFT'
+                    horizontal_offset = -0.5
+                elif 'RIGHT' in answer:
+                    position = 'RIGHT'
+                    horizontal_offset = 0.5
+                else:
+                    position = 'CENTER'
+                    horizontal_offset = 0.0
+                
+                # Parse distance estimate
+                distance_estimate = 'MEDIUM'
+                estimated_distance = 2.0
+                
+                if 'CLOSE' in answer:
+                    distance_estimate = 'CLOSE'
+                    estimated_distance = 0.7
+                elif 'FAR' in answer and 'FAR_LEFT' not in answer and 'FAR_RIGHT' not in answer:
+                    distance_estimate = 'FAR'
+                    estimated_distance = 4.0
+                else:
+                    distance_estimate = 'MEDIUM'
+                    estimated_distance = 2.0
+                
+                return {
+                    'found': True,
+                    'object': object_description,
+                    'position': position,
+                    'horizontal_offset': horizontal_offset,
+                    'distance_estimate': distance_estimate,
+                    'estimated_distance': estimated_distance,
+                    'raw_response': answer,
+                    'confidence': 0.7
+                }
+            else:
+                return {
+                    'found': False,
+                    'object': object_description,
+                    'reason': answer.replace('NOT_FOUND:', '').strip(),
+                    'raw_response': answer
+                }
+                
+        except Exception as e:
+            print(f"[ERROR] VLM find_object failed: {e}")
+            return {
+                'found': False,
+                'object': object_description,
+                'reason': f'VLM error: {e}'
+            }
+
+    def get_object_direction(self, frame: np.ndarray, object_description: str) -> tuple[float, float, str]:
+        """
+        Get direction to turn and estimated distance to reach an object.
+        
+        Args:
+            frame: Current camera frame
+            object_description: Description of object to find
+            
+        Returns:
+            Tuple of (turn_angle_degrees, estimated_distance_meters, status_message)
+        """
+        result = self.find_object(frame, object_description)
+        
+        if not result['found']:
+            return 0.0, 0.0, f"Object not found: {result.get('reason', 'unknown')}"
+        
+        # Convert horizontal offset to turn angle
+        # Assuming ~60 degree horizontal FOV
+        fov_degrees = 60
+        horizontal_offset = float(result.get('horizontal_offset', 0.0))
+        estimated_distance = float(result.get('estimated_distance', 2.0))
+        
+        turn_angle = -horizontal_offset * (fov_degrees / 2)
+        
+        return float(turn_angle), float(estimated_distance), f"Found {object_description} at {result['position']}"
